@@ -1,0 +1,976 @@
+---
+title: "Data Analysis"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("~/Documents/Edinburgh/Dissertation/Dementia")
+```
+
+
+## Load data
+
+Load the easySHARE data. For information on data and variables, see the [easySHARE data  guide](http://www.share-project.org/fileadmin/pdf_documentation/easySHARE_Release_8.0.0_ReleaseGuide.pdf).
+
+```{r easyshare}
+load("easySHARE_rel8_0_0.rda")
+```
+
+Load packages:
+
+```{r packs, message = FALSE}
+library(ggplot2)
+library(tidyverse)
+library(gridExtra)
+library(dplyr)
+library(data.table)
+library(corrplot)
+library(countrycode)
+library(VIM)
+require(mice)
+require(JointAI) 
+library(bnlearn)
+library(Rgraphviz)
+```
+
+## Cognitive score
+
+EasySHARE does not record diagnosis of dementia (e.g. Alzheimer's disease) in all waves. Instead, we will create a composite cognitive score as a proxy for dementia severity, following [Crimmins et al. (2011)](https://pubmed.ncbi.nlm.nih.gov/21743047/). The cognitive function indices are described in pg. 23 of the easySHARE data guide.
+
+```{r cogindices, message = FALSE, fig.height=3, fig.width=9} 
+cogvars <- c("recall_1", "recall_2", "orienti", "numeracy_1", "numeracy_2")
+cog = easySHARE_rel8_0_0[cogvars]
+p1 = ggplot() +
+  geom_histogram(aes(x=cog$recall_1), color="darkblue", fill="lightblue") +
+  labs(x ="Recall of words, first trial")
+p2 = ggplot() +
+  geom_histogram(aes(x=cog$recall_2), color="darkblue", fill="lightblue") +
+  labs(x ="Recall of words, second trial")
+p3 = ggplot() +
+  geom_histogram(aes(x=cog$orienti), color="darkblue", fill="lightblue") +
+  labs(x ="Orientation to date")
+p4 = ggplot() +
+  geom_histogram(aes(x=cog$numeracy_1), color="darkblue", fill="lightblue") +
+  labs(x ="Numeracy Score 1 (percentage)")
+p5 = ggplot() +
+  geom_histogram(aes(x=cog$numeracy_2), color="darkblue", fill="lightblue") +
+  labs(x ="Numeracy Score 2 (subtraction)")
+grid.arrange(p1, p2, p3, p4, p5, nrow = 2)
+```
+
+Notice the missing values (missing codes are explained on pg. 6 of missing codes of the easySHARE guide). In addition, for the numeracy measures, only one score is recorded in latter waves (pg. 23). Here we take a simple average if both measures are availble. However, you may consider other approaches (please include an explanation/motivation). Notice that  `numeracy_1` ranges from 1 to 5, while `numeracy_2` ranges from 0 to 5.
+
+```{r numeracy, message = FALSE, warning=FALSE, fig.height=2, fig.width=3}
+numeracy = rep(NA,dim(cog)[1])
+numeracy[cog$numeracy_1 >= 0 & cog$numeracy_2 >= 0] = (cog$numeracy_1[cog$numeracy_1 >= 0 & cog$numeracy_2 >= 0] + cog$numeracy_2[cog$numeracy_1 >= 0 & cog$numeracy_2 >= 0] )/2
+numeracy[cog$numeracy_1 >= 0 & cog$numeracy_2 < 0] = cog$numeracy_1[cog$numeracy_1 >= 0 & cog$numeracy_2 < 0]
+numeracy[cog$numeracy_1 < 0 & cog$numeracy_2 >= 0] = cog$numeracy_2[cog$numeracy_1 < 0 & cog$numeracy_2 >= 0]
+cog$numeracy = numeracy
+ggplot() +
+  geom_histogram(aes(x=cog$numeracy), color="darkblue", fill="lightblue") +
+  labs(x ="Numeracy Score")
+```
+
+We now create a composite cognitive score, ranging from 0 (bad) to 29 (good), that combines the recall scores, orientation, and numeracy measure. Note that orientation is on the opposite scale, with 0 (good) and 4 (bad), so we transform appropiately. 
+
+```{r cogscore, message = FALSE, warning=FALSE, fig.height=2, fig.width=3}
+cogscore = rep(NA,dim(cog)[1])
+ind = cog$recall_1 >= 0 & cog$recall_2 >= 0 & cog$orienti >= 0 & !is.na(numeracy)
+cogscore[ind] = cog$recall_1[ind] + cog$recall_2[ind] +  cog$orienti[ind] + cog$numeracy[ind]
+cog$cogscore = cogscore
+ggplot() +
+  geom_histogram(aes(x=cog$cogscore[ind]), color="darkblue", fill="lightblue", binwidth =2 ) +
+  labs(x ="Composite cogntive score")
+```
+
+## Dementia risk factors
+
+Extract variables related to modifiable risk factors identified in literature: education, hearing loss, traumatic brain injury, hypertension, alcohol consumption, smoking, obesity, physical activity, depression, social isolation, diabetes, and air pollution [Livingston et al. (2020)](https://www.thelancet.com/article/S0140-6736(20)30367-6/fulltext). Refer to the easySHARE guide for a description of the variables availble. You may also consider other relevant risk factors, along with an explanation and motivation. Gender and age are also relevant variables to consider, e.g. to explore differences between men and women [Beam et al. (2018)](https://pubmed.ncbi.nlm.nih.gov/30010124/).
+
+The SHARE project is a multi-country longitudinal study. You may decide to focus on a single or compare multiple countries. 
+
+
+```{r}
+
+easySHARE_rel8_0_0$country_name <- countrycode(easySHARE_rel8_0_0$country_mod, origin = "iso3n", destination = "country.name") ## Add country names
+easySHARE_rel8_0_0$country_birth_name <- countrycode(easySHARE_rel8_0_0$birth_country , origin = "iso3n", destination = "country.name") ## Add country of birth name
+easySHARE_rel8_0_0$citizenship_name <- countrycode(easySHARE_rel8_0_0$citizenship , origin = "iso3n", destination = "country.name") ## Add citizen name
+easySHARE_rel8_0_0$moved_country <- as.numeric(easySHARE_rel8_0_0$country_mod == easySHARE_rel8_0_0$birth_country) ## See if the participant has moved country 
+
+```
+
+We now add cognitive score to the complete data set and proceed by removing all records where we see an NA for the cognitive score in the data set.
+
+```{r}
+
+easySHARE_rel8_0_0$cogscore <- cogscore ## Add cogscore to the dataset
+
+index <- which(is.na(easySHARE_rel8_0_0$cogscore) == FALSE) ## remove all nas from dataset 
+easySHARE_rel8_0_0 <- easySHARE_rel8_0_0[index, ] ## remove all nas from cogscore from dataset
+
+```
+
+We explore different factors of the data set and identify the number of values within the missing categories, any number less than 0 for mist variables. 
+
+```{r}
+
+family_status_df <- data.frame(table(easySHARE_rel8_0_0$siblings_alive))
+
+ggplot(family_status_df, aes(Var1, Freq)) +     # Properly drawing ggplot2 plot
+  geom_bar(stat = "identity")
+
+```
+We take a copy of the data set to start to reduce the number of records based on identified NA values and also identify categories of cognitive impairment. 
+
+We remove waves 3 and 7 given the proportion of NA values. We also remove all participants with age less than 60,  education identifiers more than 5 and change filtered data in the siblings alive category.
+
+We remove Romania from our analysis given then absence of records and also remove all participants with unknown countries. 
+
+Cutoffs to define mild, severe and no impairment as a form of discretization.
+
+```{r}
+
+reduced_dataset <- easySHARE_rel8_0_0 ## Take a copy of the dataset to remove rows 
+
+reduced_dataset <- reduced_dataset[reduced_dataset$wave != 3,] ## Remove all of wave 3
+reduced_dataset <- reduced_dataset[reduced_dataset$wave != 7,] ## Remove wave 7
+
+reduced_dataset <- reduced_dataset[reduced_dataset$age > 60, ] ## Remove all below 60
+reduced_dataset <- reduced_dataset[reduced_dataset$isced1997_r < 6, ] ## Remove all education levels 
+reduced_dataset[reduced_dataset$siblings_alive == -9, ] <- 0 ## Make filtered data to 0s
+
+reduced_dataset <- reduced_dataset[reduced_dataset$country_name != "Romania", ] ## Remove Romania
+reduced_dataset <- reduced_dataset[reduced_dataset$country_name != "0", ] ## Remove non country
+
+sev_imp_cutoff <- mean(reduced_dataset$cogscore) - sd(reduced_dataset$cogscore) ## Calculate the cutoffs for severe impairment
+mild_imp_cutoff <- mean(reduced_dataset$cogscore) ## Calculate the cutoffs for mild impairment
+
+## Create a category column for impairment
+reduced_dataset$cog_cat <- "Normal"
+reduced_dataset$cog_cat[reduced_dataset$cogscore < mild_imp_cutoff]  <- "Mildly impaired"
+reduced_dataset$cog_cat[reduced_dataset$cogscore < sev_imp_cutoff] <- "Severly impaired"
+
+```
+
+
+We retain all variables of interest and start analysis into imputation and with the records and variables of interest. We also replace all misisng values with NA. In the easySHARE dataset that have missing codes that are all less than 0. By replacing them with NA values R can treat them as missing. 
+
+
+```{r}
+
+## Retain variables of interest 
+final_dataset <- reduced_dataset[ , c("isced1997_r", "country", "age", "bmi2", "smoking", "ever_smoked","eurod", "female", "cog_cat", "euro1", "euro2", "euro3", "euro4", "euro5", "euro6", "euro7", "euro8", "euro9", "euro10", "euro11", "euro12", "casp", "br010_mod", "wave", "country_name", "mother_alive", "father_alive", "siblings_alive", "ch001_", "ch021_mod", "iv009_mod", "hhsize", "ch007_km", "chronic_mod", "mobilityind", "lgmuscle", "bmi", "cogscore", "ever_smoked")]
+
+## Create NAs instead of negative values
+final_dataset <- replace(final_dataset, final_dataset < 0, NA)
+
+
+```
+
+We look at stochastic regression imputation for BMI values. We create a new data set with the variables of interest and proceed by building a model for BMI based on country, mobility index and large muscle index. Using the model we predict all bmi values before adding a stochastic component to the predicted values. For any values that had NA we replced them with the stochastically predicted values in the data set. 
+
+Using the predicted values for the NAs we categorise these into the bands described by the BMI2 variable and add this to the final dataset. 
+
+```{r}
+
+bmi_data <- final_dataset[,c("bmi", "mobilityind", "country_name", "lgmuscle")] ## Dataset to predict casp
+
+n <- nrow(bmi_data) ## no. of rows
+
+model2 <- lm(bmi ~ country_name + mobilityind + lgmuscle, data = bmi_data) ## linear regression model
+summary(model2) 
+predsri2 <- predict(model2,bmi_data)+rnorm(n,0,sigma(model2))  ## predicted values
+bmi_pred <- ifelse(is.na(final_dataset$bmi)==TRUE,predsri2,final_dataset$bmi) ## New data
+
+storagevector <- rep(NA, length(bmi_pred)) ## Store BMI categroies
+storagevector <- ifelse(is.na(final_dataset$bmi2)==TRUE,predsri2,final_dataset$bmi2) ## input all categories where the is no NA
+storagevector[storagevector > 4 & storagevector < 18.5] <- 1 ## Add categories for all predicted BMIs
+storagevector[storagevector >= 18.5 & storagevector < 25.9] <- 2 ## Add categories for all predicted BMIs
+storagevector[storagevector >= 25.9 & storagevector < 29.9] <- 3 ## Add categories for all predicted BMIs
+storagevector[storagevector >= 29.9] <- 4 ## Add categories for all predicted BMIs
+
+final_dataset$bmi2 <- storagevector ## Replace initial dataset
+
+```
+
+Create a new data set consisting of variables of interest to CASP bands prior to stochastic regression imputation. 
+
+Build a regression model where casp is a linear function of depression band and country name. Add a residual or stochasticity to the variable of interest. Predict the CASP band score based on the regression model and impute all NA values in the orginal dataset with these values. 
+
+
+```{r}
+
+
+casp_data <- final_dataset[,c("eurod", "casp", "country_name")] ## Dataset to predict casp
+
+n <- nrow(casp_data) ## no. of rows
+
+model <- lm(casp ~ country_name + eurod, data = casp_data) ## linear regression model
+summary(model) 
+predsri <- predict(model,casp_data)+rnorm(n,0,sigma(model))  ## predicted values
+final_dataset$casp <- ifelse(is.na(final_dataset$casp)==TRUE,predsri,final_dataset$casp) ## New data
+
+```
+
+Generate a new family variable, representing the amount of generations a participant has alive. We first create a new data frame with all the variables of interest present. We create storage variables to store a 1 or 0 depending on if the participant has parents, siblings, children or grandchildren alive. 
+
+Based on the varibales in the easyShare data set the storage vectors are filled with a yes (1) or no (0) binary variable. The family_status variable is created and generated by summing the storage vectors. 
+
+Graphs are created to show the distribution and missingness of the family_status variable and the reason for missingness if any.
+
+```{r}
+
+family <- final_dataset[, c("mother_alive", "father_alive", "siblings_alive", "ch001_", "ch021_mod")] ##  Create data set with variable for interest relating to family variables
+family_na <- final_dataset[, c("mother_alive", "father_alive", "siblings_alive", "ch001_", "ch021_mod")] ## Create data set with variable for interest relating to family variables, ready to remove NAs to identify complete cases 
+
+family_aggr_1 = aggr(family_na, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(family_na), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern")) ## Look into missingness proportions
+
+## Set up storage vectors 
+parents_alive <- rep(NA, nrow(family))
+siblings_alive <- rep(NA, nrow(family))
+children_alive <- rep(NA, nrow(family))
+grandchildren_alive <- rep(NA, nrow(family))
+
+parents_alive[family$father_alive == 5 & family$mother_alive == 5] <- 0 ## check if both parents are not alive
+parents_alive[family$father_alive == 1 | family$mother_alive == 1] <- 1 ## check if either parent is alive
+siblings_alive[family$siblings_alive > 0] <- 1 ## Check if more than 1 sibing is alive
+siblings_alive[family$siblings_alive == 0] <- 0 ## Check if no siblings are alive
+ 
+children_alive[family$siblings_alive > 0] <- 1 ## Check if any siblings are alive
+children_alive[family$siblings_alive == 0] <- 0 ## Check if any siblings are not alive
+
+grandchildren_alive[family$ch021_mod > 0] <- 1 ## Check if any grandchildren are alive
+grandchildren_alive[family$ch021_mod == 0] <- 0 ## Check if any grandchildren are not alive
+
+
+family_status <- parents_alive +  siblings_alive + children_alive + grandchildren_alive ## See how many generations are alive by summing the binary dummy variables
+
+
+family_status_df <- data.frame(family_status) ## Create a data frame with new variable
+
+ggplot(family_status_df, aes(x = family_status)) +
+  geom_bar() ## Plot if distribution of family status 
+
+final_dataset$family_status <- family_status ## Add new variable to dataset
+
+```
+
+Generate a new social status variable, representing an index of the participants social life. 
+
+We first create a new data frame with all the variables of interest present. We look into the missingness of these variables.
+
+We impute the variable children living within 5km. The social status variable is then computed by summing the three variables of interest.
+
+A data frame is created to ensure we can plot missingness and the distribution of the new variable. The social status variable is now added to the final dataset ready for analysis
+
+```{r}
+
+
+social <- final_dataset[, c("iv009_mod", "hhsize", "ch007_km")] ## Create a new data frame with variables of interest
+social <- replace(social, social < 0, NA) ## Replace missing values with NAs for analysis
+
+social_aggr_1 = aggr(social, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(social), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern")) ## Generate proportion of missingness graph
+
+social$ch007_km[social$ch007_km == 5] <- 0 ## Impute children living 5km away variable
+
+social_status <- (5 - social$iv009_mod) + social$hhsize + social$ch007_km ## Calculate social status score
+ 
+social_status_df <- data.frame(social_status)  ## Put social status score in a data frame 
+
+ggplot(social_status_df, aes(x = social_status)) +
+  geom_bar() ## Plot distribution of social status variable
+
+final_dataset$social_status <- social_status ## Add social status variable to final dataset
+
+social_aggr_2 = aggr(social_status, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(social_status), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern")) ## Recheck missingness percentage after imputation
+
+
+```
+
+Impute depression index based on the questionnaires missing values. Any unknown variable was assumed to be a yes in the questionnaire. We create a new vector to store imputed values before using if statements to determine if imputation is needed. 
+
+```{r}
+depression <- final_dataset$eurod ## create new vector to store imputed values
+depression_adj <- ifelse(is.na(final_dataset$euro1)==TRUE, 1, final_dataset$euro1) + ifelse(is.na(final_dataset$euro2)==TRUE, 1, final_dataset$euro2) + ifelse(is.na(final_dataset$euro3)==TRUE, 1, final_dataset$euro3) + ifelse(is.na(final_dataset$euro4)==TRUE, 1, final_dataset$euro4) + ifelse(is.na(final_dataset$euro5)==TRUE, 1, final_dataset$euro5) + ifelse(is.na(final_dataset$euro6)==TRUE, 1, final_dataset$euro6) + ifelse(is.na(final_dataset$euro7)==TRUE, 1, final_dataset$euro7) + ifelse(is.na(final_dataset$euro8)==TRUE, 1, final_dataset$euro8) + ifelse(is.na(final_dataset$euro9)==TRUE, 1, final_dataset$euro9) + ifelse(is.na(final_dataset$euro10)==TRUE, 1, final_dataset$euro10) - ifelse(is.na(final_dataset$euro11)==TRUE, 1, final_dataset$euro11) + ifelse(is.na(final_dataset$euro12)==TRUE, 1, final_dataset$euro12) ## Generate a neweurod dataset taking into account missingenss
+
+depression <- ifelse(is.na(depression)==TRUE, depression_adj, depression) ## If eurod is missing then impute
+depression <- ifelse(depression < 0, 0, depression) ## ensure variable is > 0
+
+final_dataset$eurod <-depression ## Add to orginal dataset
+```
+
+Cut down the new dataset even further, removing all variables that were used for imputation 
+
+```{r}
+
+final_dataset_relevent_vars <- final_dataset[, c("age", "female","cog_cat","br010_mod", "isced1997_r", "smoking", "eurod", "casp", "social_status", "family_status", "bmi2", "chronic_mod", "country_name", "wave", "cogscore", "ever_smoked")]
+
+```
+
+Loop through each country to generate a plot of complete cases for each country to ensure the samples size we will be using is large enough for the DAG generation and marginal probability distribution generation.
+
+```{r}
+
+countrydata <- list() ## Create list to store country variables
+
+## Loop to run through countries and store each specific country in new dataframes
+j <- 1
+for (i in unique(final_dataset_relevent_vars$country_name)) {
+  countrydata[[j]] <- final_dataset_relevent_vars[final_dataset_relevent_vars$country_name == i,]
+  names(countrydata)[j] <- i
+  j <- j + 1
+}
+
+CompleteCases <- rep(0, length(countrydata))
+
+## Loop to run through countries store the number of complete cases 
+for (i in 1:length(countrydata)) {
+  CompleteCases[i] <- sum(complete.cases(countrydata[[i]]))
+}
+
+## Store the number complete cases in each country
+CompleteCases.df <- data.frame("Country" = names(countrydata), "Complete_cases" = CompleteCases)
+
+ggplot(CompleteCases.df, aes(x=Country, y=Complete_cases)) + 
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 45)) 
+
+```
+
+For a given country - in this case Germany store all complete cases from each wave to help us identify a specific wave to use for the analysis. 
+
+We create variables to store the number of complete cases in the data set and also the number of participants in the wave
+
+```{r}
+
+country_dataset <- final_dataset_relevent_vars[final_dataset_relevent_vars$country_name == "Spain", ] ## Store all waves of the country due to be analysed
+
+## NOTE WAVE 3 and 7 have been removed from the dataset
+wave1 <- sum(complete.cases(country_dataset[country_dataset$wave == 1,])) ## Looking at the number of complete cases in wave 1
+wave2 <- sum(complete.cases(country_dataset[country_dataset$wave == 2,])) ## Looking at the number of complete cases in wave 2
+wave4 <- sum(complete.cases(country_dataset[country_dataset$wave == 4,])) ## Looking at the number of complete cases in wave 4
+wave5 <- sum(complete.cases(country_dataset[country_dataset$wave == 5,])) ## Looking at the number of complete cases in wave 5
+wave6 <- sum(complete.cases(country_dataset[country_dataset$wave == 6,])) ## Looking at the number of complete cases in wave 6
+wave8 <- sum(complete.cases(country_dataset[country_dataset$wave == 8,])) ## Looking at the number of complete cases in wave 8
+
+wave1.num <- nrow((country_dataset[country_dataset$wave == 1,])) ## Looking at the number of surveys in wave 1
+wave2.num <- nrow((country_dataset[country_dataset$wave == 2,])) ## Looking at the number of surveys in wave 2
+wave4.num <- nrow((country_dataset[country_dataset$wave == 4,])) ## Looking at the number of surveys in wave 4
+wave5.num <- nrow((country_dataset[country_dataset$wave == 5,])) ## Looking at the number of surveys in wave 5
+wave6.num <- nrow((country_dataset[country_dataset$wave == 6,])) ## Looking at the number of surveys in wave 6
+wave8.num <- nrow((country_dataset[country_dataset$wave == 8,])) ## Looking at the number of surveys in wave 8
+
+
+wave_analysis <- data.frame(wave = sort(unique(country_dataset$wave)), Complete_cases = c(wave1, wave2, wave4, wave5, wave6, wave8), surveys = c(wave1.num, wave2.num, wave4.num, wave5.num, wave6.num, wave8.num) ) ## Store in a dataframe so we can plot with ggplot
+
+ggplot(wave_analysis, aes(x=wave, y=Complete_cases)) + 
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 45)) 
+
+ggplot(wave_analysis, aes(x=wave, y=surveys)) + 
+  geom_bar(stat = "identity") +
+  theme(axis.text.x = element_text(angle = 45)) 
+
+```
+
+Asses the missingness at this level of the analysis given and country and wave to study
+
+```{r}
+
+country_wave_dataset <- country_dataset[country_dataset$wave == 5,]
+
+md_pattern(country_wave_dataset,pattern=FALSE,color=c('#34111b','#e30f41'))
+
+family_aggr_1 = aggr(country_wave_dataset, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(country_wave_dataset), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern"))
+
+```
+
+Impute missing social status variables by checking if the 5km from home variable is set to NA and imput this assuming there are no children living within 5km. 
+
+Firstly create a new social status data set and filter on the country and the wave of interest. We then replace NAs within the dataset and proceed with missingness checks and impute all values when the children living less then 5km away with 0. The social status index is then recalculated and readded  to the final dataset to analyse.
+
+```{r}
+
+social <- final_dataset[final_dataset$wave == 5 & final_dataset$country_name == "Spain", c("iv009_mod", "hhsize", "ch007_km")] ## Create a new social dataset with variables of interest 
+social <- replace(social, social < 0, NA) ## Replace missing values with NA
+
+social_aggr_1 = aggr(social, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(social), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern")) ##  Look into missingness proportions prior to imputation
+
+social$ch007_km[social$ch007_km == 5 | is.na(social$ch007_km)] <- 0 ## Impute missing values with 0
+
+social_status <- (5 - social$iv009_mod) + social$hhsize + social$ch007_km ## Recalculate social status index
+
+social_status_df <- data.frame(social_status) ## Put social status in a df for plotting
+
+ggplot(social_status_df, aes(x = social_status)) +
+  geom_bar() ## Plot distribution of social status
+
+country_wave_dataset$social_status <- social_status ## Add new social status to dataset
+
+social_aggr_2 = aggr(social_status, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(social_status), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern")) ## Recheck missingness
+
+
+```
+
+
+
+Look into the missingess of our final complete dataset used in DAGs. We rename varaibles to make it easier to read and hence we create a new dataframe. 
+
+```{r}
+missing_dataset <- country_wave_dataset ## Replicate data frame
+names(missing_dataset) <- c("Age", "Gender", "Dementia", "Alcohol Habits", "Education","Smoking Habits", "Depression", "Quality of Life","Social Status", "Family Status", "BMI", "Chronic Illness",  "Country", "Wave", "Dementia","Ever Smoked") ## Rename variables
+
+md_pattern(missing_dataset,pattern=FALSE,color=c('#34111b','#e30f41')) ## Generate missingness table
+
+family_aggr_1 = aggr(missing_dataset, col=mdc(1:2), numbers=TRUE, sortVars=TRUE, labels=names(missing_dataset), cex.axis=.7, gap=3, ylab=c("Proportion of missingness","Missingness Pattern")) ## Generate missingness proportions graph
+
+```
+
+We now look at converting all variables from continuous variables to discrete variables. This is done via a vartiety of techniques, from interval generation to changnig the type of variable from an ordinal variable to a factor variable.
+
+```{r}
+
+country_wave_dataset$age <- cut(country_wave_dataset$age, breaks = c(seq(60,90,5),100), ordered_result = TRUE, right = FALSE) ## Split age into groups
+
+country_wave_dataset$cog_cat <- factor(country_wave_dataset$cog_cat, ordered = TRUE) ## Make the cognative category a factor variable 
+
+country_wave_dataset$female <- factor(country_wave_dataset$female) ## make gender a factor variable
+
+## Encode eduction into three bands 
+country_wave_dataset$education_band <- rep(NA, nrow(country_wave_dataset))
+country_wave_dataset$education_band[country_wave_dataset$isced1997_r == 6 | country_wave_dataset$isced1997_r == 5] <- "Tertiary"
+country_wave_dataset$education_band[country_wave_dataset$isced1997_r == 3 | country_wave_dataset$isced1997_r == 4 | country_wave_dataset$isced1997_r == 2] <- "Secondary"
+country_wave_dataset$education_band[country_wave_dataset$isced1997_r == 0 | country_wave_dataset$isced1997_r == 1] <- "Primary"
+country_wave_dataset$education_band <- factor(country_wave_dataset$education_band, ordered = TRUE)
+
+country_wave_dataset$bmi2 <- factor(country_wave_dataset$bmi2, ordered = TRUE) ## Ensure bmi is cut into bins 
+
+## Split depression into bands for mild, medium and severe
+country_wave_dataset$depression_band <- rep(NA, nrow(country_wave_dataset))
+country_wave_dataset$depression_band[country_wave_dataset$eurod == 0 | country_wave_dataset$eurod == 1 ] <- 1
+country_wave_dataset$depression_band[country_wave_dataset$eurod == 2 | country_wave_dataset$eurod == 3 |country_wave_dataset$eurod == 4] <- 2
+country_wave_dataset$depression_band[country_wave_dataset$eurod == 5 | country_wave_dataset$eurod == 6 |country_wave_dataset$eurod == 7 | country_wave_dataset$eurod == 8] <- 3
+country_wave_dataset$depression_band[country_wave_dataset$eurod == 9 | country_wave_dataset$eurod == 10 |country_wave_dataset$eurod == 11 | country_wave_dataset$eurod == 12 ] <- 4
+
+## Ensure eurod is a factor variables 
+country_wave_dataset$eurod <- factor(country_wave_dataset$eurod, ordered = TRUE)
+country_wave_dataset$depression_band <- factor(country_wave_dataset$depression_band, ordered = TRUE)
+
+## Ensure smoking is a factor variables 
+country_wave_dataset$smoking <- factor(country_wave_dataset$smoking, ordered = TRUE)
+
+## Ensure alcohol consumption is a factor variables 
+country_wave_dataset$br010_mod <- factor(country_wave_dataset$br010_mod, ordered = TRUE)
+
+## Split alcohol consumption into bands
+country_wave_dataset$alcohol <- rep(NA, nrow(country_wave_dataset))
+country_wave_dataset$alcohol[country_wave_dataset$br010_mod == 1] <- "Non- dirnker"
+country_wave_dataset$alcohol[country_wave_dataset$br010_mod == 2 | country_wave_dataset$br010_mod == 3 | country_wave_dataset$br010_mod == 4 | country_wave_dataset$br010_mod == 5 | country_wave_dataset$br010_mod == 6 | country_wave_dataset$br010_mod == 7] <- "Drinker"
+
+country_wave_dataset$alcohol <- factor(country_wave_dataset$alcohol, ordered = TRUE)
+
+## Split quality of life index into into bands
+country_wave_dataset$casp_band <- cut(country_wave_dataset$casp, breaks = c(seq(10,50,5)), ordered_result = TRUE, right = FALSE)
+
+## Esnure social status and family status are factor variables
+country_wave_dataset$social_status <- factor(country_wave_dataset$social_status, ordered = TRUE)
+country_wave_dataset$family_status <- factor(country_wave_dataset$family_status, ordered = TRUE)
+
+## Ensure chronic conditions is a fatcor variable
+country_wave_dataset$chronic_mod <- factor(country_wave_dataset$chronic_mod, ordered = TRUE)
+
+## Ensure ever_smoked is a fatcor variable
+country_wave_dataset$ever_smoked <- factor(country_wave_dataset$ever_smoked, ordered = TRUE)
+
+```
+
+Generate tables to measure the cognitive score for each band for each variable. All variables are considered and will be plotted later to ensure there are no spurious relationships between certain bands. 
+
+Changing the interval conditions for some bands may have a larrge impact in the average congnitive score. We aim to get non-disjoin plots.
+
+```{r}
+
+alcohol_v_cogscore <- aggregate(country_wave_dataset$cogscore, list(country_wave_dataset$alcohol), FUN=mean) ## Look at average cog score across alcohol bands
+age_v_cogscore <- aggregate(country_wave_dataset$cogscore, list(country_wave_dataset$age), FUN=mean) ## Look at average cog score across age bands
+education_v_cogscore <- aggregate(country_wave_dataset$cogscore, list(country_wave_dataset$education_band), FUN=mean) ## Look at average cog score across education bands
+depression_v_cogscore <- aggregate(country_wave_dataset$cogscore, list(country_wave_dataset$depression_band), FUN=mean) ## Look at average cog score across depression bands
+smoking_v_cogscore <- aggregate(country_wave_dataset$cogscore, list(country_wave_dataset$smoking), FUN=mean) ## Look at average cog score across smoking bands
+casp_band_v_cogscore <- aggregate(country_wave_dataset$cogscore, list(country_wave_dataset$casp_band), FUN=mean) ## Look at average cog score across casp bands
+socialstatus_v_cogscore <- aggregate(country_wave_dataset$cogscore, list(country_wave_dataset$social_status), FUN=mean) ## Look at average cog score across social bands
+familystatus_v_cogscore <- aggregate(country_wave_dataset$cogscore, list(country_wave_dataset$family_status), FUN=mean) ## Look at average cog score across family status bands
+bmi_v_cogscore <- aggregate(country_wave_dataset$cogscore, list(country_wave_dataset$bmi2), FUN=mean) ## Look at average cog score across bmi bands
+chronicmod_v_cogscore <- aggregate(country_wave_dataset$cogscore, list(country_wave_dataset$chronic_mod), FUN=mean) ## Look at average cog score across bmi bands
+
+casp_v_cogscore <- aggregate(country_wave_dataset$cogscore, list(country_wave_dataset$casp_band), FUN=mean) ## Look at average cog score across bmi bands
+
+```
+
+We plot the count of records in each band for each variable alongside the average cognitive score across bands for each variables. We are looking to ensure each band has a large enough sample size so bnlearn can learn the marginal distributions without having too little data. We also want to ensure  there are no spurious relationships between certain bands.
+
+```{r}
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$cog_cat),color="darkblue", fill="lightblue")+
+  labs(x ="Cogntive impairment") ## Count of values in cogscore bands
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$age),color="darkblue", fill="lightblue") + labs(x ="Age") ## Count of values in Age  bands
+ggplot() + geom_point(data = age_v_cogscore, aes(x=Group.1, y=x), size = 3, color = 'black') + geom_line(data = age_v_cogscore, aes(x=Group.1, y=x), color = 'black', size = 1, group = 1, na.rm = TRUE) ## Average cogscore for each age band
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$education_band),color="darkblue", fill="lightblue")+
+  labs(x ="Education Band") ## Count of values in Education bands
+ggplot() + geom_point(data = education_v_cogscore, aes(x=Group.1, y=x), size = 3, color = 'black') + geom_line(data = education_v_cogscore, aes(x=Group.1, y=x), color = 'black', size = 1, group = 1, na.rm = TRUE) ## Average cogscore for each education band
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$isced1997_r),color="darkblue", fill="lightblue")+
+  labs(x ="Education")
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$bmi2),color="darkblue", fill="lightblue")+
+  labs(x ="BMI") ## Count of values in BMI bands
+ggplot() + geom_point(data = bmi_v_cogscore, aes(x=Group.1, y=x), size = 3, color = 'black') + geom_line(data = bmi_v_cogscore, aes(x=Group.1, y=x), color = 'black', size = 1, group = 1, na.rm = TRUE) ## Average cogscore for each bmi band
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$smoking),color="darkblue", fill="lightblue")+
+  labs(x ="Currently Smoking") ## Count of values in Smoking bands
+ggplot() + geom_point(data = smoking_v_cogscore, aes(x=Group.1, y=x), size = 3, color = 'black') + geom_line(data = smoking_v_cogscore, aes(x=Group.1, y=x), color = 'black', size = 1, group = 1, na.rm = TRUE) ## Average cogscore for each smoking band
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$eurod),color="darkblue", fill="lightblue")+
+  labs(x ="Depression Index")
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$depression_band),color="darkblue", fill="lightblue")+
+  labs(x ="Depression Index Band") ## Count of values in depression bands
+ggplot() + geom_point(data = depression_v_cogscore, aes(x=Group.1, y=x), size = 3, color = 'black') + geom_line(data = depression_v_cogscore, aes(x=Group.1, y=x), color = 'black', size = 1, group = 1, na.rm = TRUE) ## Average cogscore for each depression band
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$br010_mod),color="darkblue", fill="lightblue")+
+  labs(x ="Alcohol")
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$alcohol),color="darkblue", fill="lightblue")+
+labs(x ="Alcohol Category", y = "Count") + ggtitle("Alcohol Category Distribution for Spain") 
+
+ggplot() + geom_point(data = alcohol_v_cogscore, aes(x=Group.1, y=x), size = 3, color = 'black') + geom_line(data = alcohol_v_cogscore, aes(x=Group.1, y=x), color = 'black', size = 1, group = 1, na.rm = TRUE) ## Average cogscore for each alchohol band
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$casp),color="darkblue", fill="lightblue")+
+  labs(x ="Casp")
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$casp_band),color="darkblue", fill="lightblue")+
+  labs(x ="Casp band") ## Count of values in casp bands
+ggplot() + geom_point(data = casp_v_cogscore, aes(x=Group.1, y=x), size = 3, color = 'black') + geom_line(data = casp_v_cogscore, aes(x=Group.1, y=x), color = 'black', size = 1, group = 1, na.rm = TRUE) ## Average cogscore for each casp band
+
+ggplot() + geom_bar(aes(x = country_wave_dataset$chronic_mod),color="darkblue", fill="lightblue")+
+  labs(x ="Chronic_mod band") ## Count of values in chronic condition bands
+ggplot() + geom_point(data = chronicmod_v_cogscore, aes(x=Group.1, y=x), size = 3, color = 'black') + geom_line(data = chronicmod_v_cogscore, aes(x=Group.1, y=x), color = 'black', size = 1, group = 1, na.rm = TRUE) ## Average cogscore for each chronic condition
+
+
+```
+
+We next create the datasets with a subset of variables to input into bnlearn functions. We have started with a small subset of variables before increasing the size to get our full DAG.
+
+```{r}
+
+data1 <- country_wave_dataset[, c("age", "female","cog_cat","education_band")] ## Prepare smaller data set for DAG construction
+data2 <- country_wave_dataset[, c("age", "female","cog_cat","education_band", "smoking")] ## Prepare smaller data set for DAG construction
+data3 <- country_wave_dataset[, c("age", "female","cog_cat","alcohol", "education_band")] ## Prepare smaller dataset for DAG construction
+data4 <- country_wave_dataset[, c("age", "female","cog_cat","alcohol", "education_band", "depression_band", "casp_band", "social_status", "family_status", "bmi2", "chronic_mod", "ever_smoked")] ## Prepare larger dataset for DAG construction
+data5 <- country_wave_dataset[, c("age", "female","cog_cat","alcohol", "education_band", "depression_band", "casp_band", "family_status", "bmi2", "ever_smoked")] ## Prepare larger dataset for DAG construction
+```
+
+Building our first DAG with just Age, Gender and Education variables. We generate a blacklist and BIC/BDE scores to evaluate the DAG. We run the iamb algorithm first.
+
+```{r}
+
+## First DAG build blacklist
+myblacklist = matrix(c("cog_cat","age",
+                   "female","age",
+                    "education_band", "female",
+                   "education_band", "age", 
+                   "age", "female",
+                  "education_band","female",
+                   "cog_cat","female",
+                   "cog_cat","education_band"
+                   ), 
+                 byrow = TRUE, ncol=2, dimnames =list(NULL,c("from","to")))
+
+## Build DAG
+dag1.iamb =iamb(data1, blacklist = myblacklist, test="mi")
+graphviz.plot(dag1.iamb)
+
+## drop nas from the dataset to test the BIC and BDE scores 
+data1_narm = drop_na(data1)
+
+score(dag1.iamb,data=data1_narm,type="bic")
+score(dag1.iamb,data=data1_narm,type="bde")
+
+```
+We are considering two types of constraint based algorthm so we evalulate the data with a gs algorithm and compare it to the iamb algorithm.
+
+```{r}
+
+## Test the first DAG against new algorithm
+## Build DAG
+dag1.hpc = gs(data1, blacklist = myblacklist, test="mi")
+graphviz.plot(dag1.hpc)
+
+## drop nas from the dataset to test the BIC and BDE scores 
+data1_narm = drop_na(data1)
+
+## Score the tested DAGs
+score(dag1.hpc,data=data1_narm,type="bic")
+score(dag1.hpc,data=data1_narm,type="bde")
+
+
+```
+We add smoking status variable to the DAG and are slowly attempting to build up the DAG and get more comfortable with some relationships. For the second dataset we first use iamb algorithm.
+
+```{r}
+
+## Second DAG blacklist
+myblacklist2 = matrix(c("cog_cat","age",
+                   "female","age",
+                    "education_band", "female",
+                   "education_band", "age", 
+                   "age", "female",
+                  "education_band","female",
+                   "cog_cat","female",
+                   "cog_cat","education_band",
+                  "cog_cat", "smoking", 
+                  "smoking", "age",
+                  "smoking", "female"
+                   ), 
+                 byrow = TRUE, ncol=2, dimnames =list(NULL,c("from","to")))
+
+## Build second DAG
+dag3.iamb =iamb(data2, blacklist = myblacklist2, test="mi")
+graphviz.plot(dag3.iamb)
+
+## drop nas from the second dataset to test the BIC and BDE scores 
+data2_narm = drop_na(data2)
+
+## Test BIC and BDE scores
+score(dag3.iamb,data=data2_narm,type="bic")
+score(dag3.iamb,data=data2_narm,type="bde")
+
+
+```
+Again, we test the DAG with the gs algorithm to see if there are any material changes to the DAG and complute the BIC and BDE scores.
+
+```{r}
+
+## Test the second DAG against new algorithm
+## Build DAG
+dag4.iamb = gs(data2, blacklist = myblacklist2, test="mi", alpha = 0.05)
+graphviz.plot(dag4.iamb)
+
+## Test BIC and BDE scores
+score(dag4.iamb,data=data2_narm,type="bic")
+score(dag4.iamb,data=data2_narm,type="bde")
+
+```
+
+Now that we are more comfortable with the process we use the third dataset with the complete set of variables identified. We generate a larger blacklist and also a whitelist to ensure some nodes are connected and others are not. Again, we compute the BDE and BIC score after removing NAs from the dataset. The algorithm used is the iamb algorithm. 
+
+```{r}
+
+## Third DAG blacklist
+myblacklist4 = matrix(c("cog_cat","age",
+                    "female","age",
+                    "education_band", "age", 
+                    "alcohol", "age",
+                    "family_status", "age", 
+                    "social_status", "age",
+                    "chronic_mod", "age",
+                    "depression_band", "age",
+                    "casp_band", "age",
+                    "chronic_mod", "age",
+                    "bmi2", "age",
+                    "ever_smoked", "age",
+                    
+                    "cog_cat","female",
+                    "female","female",
+                    "education_band", "female", 
+                    "alcohol", "female",
+                    "family_status", "female", 
+                    "social_status", "female",
+                    "chronic_mod", "female",
+                    "depression_band", "female",
+                    "casp_band", "female",
+                    "chronic_mod", "female",
+                    "bmi2", "female",
+                    "ever_smoked", "female",
+                    
+                    "alcohol", "education_band",
+                    "alcohol", "family_status",
+                    
+                    "family_status", "education_band",
+                    "family_status", "education_band",
+                    
+                    "bmi2", "family_status",
+                    
+                    "depression_band", "education_band",
+                    "depression_band", "family_status", 
+
+                    "social_status", "education_band",
+                    "social_status", "chronic_mod",
+                    
+                    "chronic_mod", "education_band",
+                    "chronic_mod", "family_status",
+                    
+                    "cog_cat","education_band"
+ 
+                   ), 
+                 byrow = TRUE, ncol=2, dimnames =list(NULL,c("from","to")))
+
+# Build whitelist to ensure nodes have edges between them
+mywhitelist = matrix(c("age", "education_band",
+                     "depression_band", "casp_band", 
+                     "ever_smoked", "alcohol"
+                       ),
+         ncol = 2, byrow = TRUE, dimnames = list(NULL, c("from", "to")))
+
+## build larger DAG
+dag6.iamb =iamb(data4, blacklist = myblacklist4, whitelist = mywhitelist, test="mi")
+graphviz.plot(dag6.iamb)
+
+## build larger DAG
+data4_narm = drop_na(data4)
+
+## Score the complete DAG
+score(dag6.iamb,data=data4_narm,type="bic")
+score(dag6.iamb,data=data4_narm,type="bde")
+```
+
+With a larger data set it becomes even more important to test the gs algorithm and the DAGs associated with it. We again compute the BIC and BDE score after this.
+
+```{r}
+
+## Test the thrid DAG against new algorithm
+## Build DAG
+dag6.gs = gs(data4, blacklist = myblacklist4, whitelist = mywhitelist,test="mi", alpha = 0.05)
+graphviz.plot(dag7.gs)
+
+## Test BIC and BDE scores
+score(dag6.gs,data=data4_narm,type="bic")
+score(dag6.gs,data=data4_narm,type="bde")
+
+```
+To test the DAG we run bootstapping technique with 500 samples to determine the average graph structure and the skeleton structure. This should show us if the graph structure is suspect to change. We maintain the same algorithm, blacklists and whitelists. 
+
+We firstly run the to algorithm with the bootstrapping function before retrieving the skeleton.
+
+```{r}
+defaultW <- getOption("warn") 
+options(warn = -1) 
+
+boot <- boot.strength(data4_narm, R = 500, algorithm = "iamb", algorithm.args = list(blacklist = myblacklist4, whitelist = mywhitelist))
+
+avg.boot <- averaged.network(boot, threshold = 0.5)
+
+avg.boot2 <- skeleton(avg.boot)
+
+graphviz.plot(avg.boot)
+graphviz.plot(avg.boot2)
+
+options(warn = defaultW)
+```
+
+Given the nature of the previous DAG we now re-run the algortihms with 2 or 3 variables left out dependent on the DAG structure and the independence nature of the system. In this case we leave out social status and chronic conditions. Again, this is firstly run with an iamb algorithm. A new blacklist is drawn up.
+
+The BDE and BIC scores are computed.
+
+```{r}
+
+## Fourth DAG blacklist
+myblacklist5 = matrix(c("cog_cat","age",
+                    "female","age",
+                    "education_band", "age", 
+                    "alcohol", "age",
+                    "family_status", "age", 
+                    "depression_band", "age",
+                    "casp_band", "age",
+                    "bmi2", "age",
+                    "ever_smoked", "age",
+                    
+                    "cog_cat","female",
+                    "female","female",
+                    "education_band", "female", 
+                    "alcohol", "female",
+                    "family_status", "female", 
+                    "depression_band", "female",
+                    "casp_band", "female",
+                    "bmi2", "female",
+                    "ever_smoked", "female",
+                    
+                    "alcohol", "education_band",
+                    "alcohol", "family_status",
+                    
+                    "family_status", "education_band",
+                    "family_status", "education_band",
+                    
+                    "bmi2", "family_status",
+                    
+                    "depression_band", "education_band",
+                    "depression_band", "family_status", 
+                    
+                    "cog_cat","education_band"
+ 
+                   ), 
+                 byrow = TRUE, ncol=2, dimnames =list(NULL,c("from","to")))
+
+# Build whitelist to ensure nodes have edges between them
+mywhitelist = matrix(c("age", "education_band",
+                     "depression_band", "casp_band", 
+                     "ever_smoked", "alcohol"
+                       ),
+         ncol = 2, byrow = TRUE, dimnames = list(NULL, c("from", "to")))
+
+## build larger DAG
+dag7.iamb =iamb(data5, blacklist = myblacklist5, whitelist = mywhitelist, test="mi")
+graphviz.plot(dag7.iamb)
+
+## build larger DAG
+data5_narm = drop_na(data5)
+
+## Score the complete DAG
+score(dag7.iamb,data=data5_narm,type="bic")
+score(dag7.iamb,data=data5_narm,type="bde")
+```
+
+We re-test the DAG with a gs algorthim, again looking for any major changes to the DAG or any big changes in BIC or BDE scores.
+
+```{r}
+
+## Test the thrid DAG against new algorithm
+## Build DAG
+dag7.gs = gs(data5, blacklist = myblacklist5, whitelist = mywhitelist,test="mi", alpha = 0.05)
+graphviz.plot(dag7.gs)
+
+## Test BIC and BDE scores
+score(dag7.gs,data=data5_narm,type="bic")
+score(dag7.gs,data=data5_narm,type="bde")
+
+
+```
+We use cross validation as a way to test the final algorithm against others  generate from other countries. During the analysis we use 3 folds and change the algorithm type from gs to iamb to again asses which of the two graph structures are a better fit for the data.
+
+```{r}
+bn.cv(data4_narm, bn = "iamb", algorithm.args = list(blacklist = myblacklist4, whitelist = mywhitelist, test="mi"), k=3)
+
+
+```
+
+To finalise DAGs we run CI tests and add any arcs that we believe should be in the DAG but have been missed out. We use mi tests and mi-sp tests for smaller datasets.
+
+```{r}
+
+ci.test("cog_cat", "casp_band", c("depression_band"), test = "mi", data = data5) ## CI test between cognitive category and quality of life given depression
+
+```
+
+To finalise DAGs we run CI tests and add any arcs that we believe should be in the DAG but have been missed out. We use mi tests and mi-sp tests for smaller datasets.
+
+```{r}
+
+ci.test("female", "cog_cat", c("depression_band"), test = "mi", data = data5) ## CI test between cognitive category and gender given gender
+
+```
+
+To finalise DAGs we run CI tests and add any arcs that we believe should be in the DAG but have been missed out. We use mi tests and mi-sp tests for smaller datasets.
+
+```{r}
+
+ci.test("cog_cat", "depression_band", c("female"), test = "mi", data = data5) ## CI test between cognitive category and depression band given gender
+
+```
+
+We check for d seperation between three variables
+
+```{r}
+
+dsep(dag7.gs, 'depression_band', 'cog_cat', "female") ## Check if depression band, cognitive category and gender are d seperted 
+
+```
+
+We check for d seperation between three variables
+
+```{r}
+
+dsep(dag7.gs, 'depression_band', 'cog_cat', "casp_band") ## Check if depression band, cognitive category and quality of life index  are d seperted 
+
+```
+
+To finalise DAGs we run CI tests and add any arcs that we believe should be in the DAG but have been missed out. We use mi tests and mi-sp tests for smaller datasets.
+
+```{r}
+
+ci.test("cog_cat", "bmi2", test = "mi", data = data5) ## CI test between cognitive category and bmi band 
+
+```
+
+To finalise DAGs we run CI tests and add any arcs that we believe should be in the DAG but have been missed out. We use mi tests and mi-sp tests for smaller datasets.
+
+```{r}
+
+ci.test("cog_cat", "ever_smoked", test = "mi", data = data5) ## CI test between cognitive category and smoking 
+
+```
+
+We now look into the marginal distributions for dementia as well as other factors. We use a Bayes approach with a uniform prior and an effective sample size of 10.
+
+We also print out the marginal probability distribution of dementia
+
+```{r}
+
+bn.bayes = bn.fit(dag6.gs,data=data4, method = "bayes", iss = 10) ## Generate marginal distributions
+
+bn.bayes$cog_cat ## Get a table of marginal distributions for dementia
+
+```
+
+Generate a full conditional probability table for Dementia risk factors
+
+```{r}
+
+bn.fit.barchart(bn.bayes$cog_cat, main = "Conditional Probabilities for Risk of Dementia - Spain", ylab = "Dementia") ## Generate full conditional probability bar chart
+
+```
+
+Generate conditional probability graphs with probabilty of dementia varying across age and education levels 
+
+```{r}
+p1 = ggplot(mapping = aes(x = rep(seq(1:length(levels(country_wave_dataset$age))),3),
+                     y=matrix(t(bn.bayes$cog_cat$prob[,,1]), ncol =1), color = rep(levels(country_wave_dataset$cog_cat), each = length(levels(country_wave_dataset$age))))) + 
+  geom_point() +
+  geom_line() +
+  scale_x_discrete(breaks=seq(1:length(levels(country_wave_dataset$age))),
+        labels=levels(country_wave_dataset$age)) +
+  labs(x = "Age", y= "Conditional probability", color = "Cognitive score", title ="Marginal Probability Distribution - Spain - Primary Education")
+p2 = ggplot(mapping = aes(x = rep(seq(1:length(levels(country_wave_dataset$age))),3),
+                     y=matrix(t(bn.bayes$cog_cat$prob[,,2]), ncol =1), color = rep(levels(country_wave_dataset$cog_cat), each = length(levels(country_wave_dataset$age))))) + 
+  geom_point() +
+  geom_line() +
+  scale_x_discrete(breaks=seq(1:length(levels(country_wave_dataset$age))),
+        labels=levels(country_wave_dataset$age)) +
+  labs(x = "Age", y= "Conditional probability", color = "Cognitive score", title ="Marginal Probability Distribution - Spain - Secondary Education")
+p3 = ggplot(mapping = aes(x = rep(seq(1:length(levels(country_wave_dataset$age))),3),
+                     y=matrix(t(bn.bayes$cog_cat$prob[,,3]), ncol =1), color = rep(levels(country_wave_dataset$cog_cat), each = length(levels(country_wave_dataset$age))))) + 
+  geom_point() +
+  geom_line() +
+  scale_x_discrete(breaks=seq(1:length(levels(country_wave_dataset$age))),
+        labels=levels(country_wave_dataset$age)) +
+  labs(x = "Age", y= "Conditional probability", color = "Cognitive score", title ="Marginal Probability Distribution - Spain - Tertiary Education")
+```
+
+```{r}
+p1
+p2
+p3
+```
+Generate marginal distributions of education bands
+
+
+```{r}
+
+bn.bayes$education_band ## show conditional probability tables for education
+
+```
+
+```{r}
+
+```
+
